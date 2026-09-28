@@ -18,7 +18,12 @@ tasks/<UID>-<短名>/
 
 | 子目录 | UID | 主题 |
 | --- | --- | --- |
+| `tasks/10979-webhook-delivery/` | 10979 | Webhook 幂等投递与重试 |
+| `tasks/10980-ttl-cache-race/` | 10980 | TTL+LRU 缓存读到过期值 |
+| `tasks/10981-wal-crash-recovery/` | 10981 | WAL 崩溃恢复丢写与半截记录 |
 | `tasks/10982-dayreport-dst/` | 10982 | 时区/夏令时的日报边界 |
+| `tasks/10984-consumer-idempotency/` | 10984 | 消费端重复投递重复记账 |
+| `tasks/10985-sqlite-job-queue/` | 10985 | sqlite 任务队列并发领取 |
 | `tasks/10992-cursor-pager/` | 10992 | 游标分页漏读与重复 |
 | `tasks/10996-json-precision/` | 10996 | 大整数与金额精度 |
 | `tasks/10997-list-api-perf/` | 10997 | 列表接口 N+1 与缺索引 |
