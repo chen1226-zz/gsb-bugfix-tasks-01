@@ -2,10 +2,13 @@
 
 对外接口（不得更改签名）：
     ensure_schema(conn)
-    list_tasks(conn, tenant_id, status=None, keyword=None, page=1, page_size=50)
+    list_tasks(conn, tenant_id, status=None, keyword=None, page=1, page_size=50) -> list[dict]
+    list_tasks_cursor(conn, tenant_id, status=None, keyword=None, cursor=None, page_size=50)
+        -> (list[dict], next_cursor)
+    count_tasks(conn, tenant_id, status=None, keyword=None) -> int
 
-返回值为 dict 列表，每个 dict 含：
-    id, tenant_id, status, created_at, title, owner
+返回的 dict 含：id, tenant_id, status, created_at, title, owner
+排序固定为 created_at DESC, id DESC。
 """
 
 SCHEMA = """
@@ -30,33 +33,54 @@ def ensure_schema(conn):
     conn.commit()
 
 
-def list_tasks(conn, tenant_id, status=None, keyword=None, page=1, page_size=50):
-    sql = [
-        "SELECT id, tenant_id, status, created_at, title, owner_id",
-        "FROM tasks WHERE tenant_id = ?",
-    ]
+def _where(tenant_id, status, keyword):
+    clauses = ["t.tenant_id = ?"]
     args = [tenant_id]
     if status is not None:
-        sql.append("AND status = ?")
+        clauses.append("t.status = ?")
         args.append(status)
     if keyword:
-        sql.append("AND title LIKE ?")
+        clauses.append("t.title LIKE ?")
         args.append(f"%{keyword}%")
-    sql.append("ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?")
-    args.extend([page_size, max(page - 1, 0) * page_size])
+    return " AND ".join(clauses), args
 
-    rows = conn.execute(" ".join(sql), args).fetchall()
-    result = []
-    for row in rows:
-        owner = conn.execute("SELECT name FROM owners WHERE id = ?", (row[5],)).fetchone()
-        result.append(
-            {
-                "id": row[0],
-                "tenant_id": row[1],
-                "status": row[2],
-                "created_at": row[3],
-                "title": row[4],
-                "owner": owner[0] if owner else None,
-            }
-        )
-    return result
+
+def _rows_to_items(rows):
+    return [
+        {
+            "id": row[0],
+            "tenant_id": row[1],
+            "status": row[2],
+            "created_at": row[3],
+            "title": row[4],
+            "owner": row[5],
+        }
+        for row in rows
+    ]
+
+
+def _page(conn, where, args, limit, offset):
+    sql = (
+        "SELECT t.id, t.tenant_id, t.status, t.created_at, t.title, o.name "
+        "FROM tasks t LEFT JOIN owners o ON o.id = t.owner_id "
+        f"WHERE {where} ORDER BY t.created_at DESC, t.id DESC LIMIT ? OFFSET ?"
+    )
+    return conn.execute(sql, args + [limit, offset]).fetchall()
+
+
+def list_tasks(conn, tenant_id, status=None, keyword=None, page=1, page_size=50):
+    where, args = _where(tenant_id, status, keyword)
+    return _rows_to_items(_page(conn, where, args, page_size, max(page - 1, 0) * page_size))
+
+
+def list_tasks_cursor(conn, tenant_id, status=None, keyword=None, cursor=None, page_size=50):
+    where, args = _where(tenant_id, status, keyword)
+    offset = int(cursor) if cursor else 0
+    items = _rows_to_items(_page(conn, where, args, page_size, offset))
+    next_cursor = str(offset + page_size) if len(items) == page_size else None
+    return items, next_cursor
+
+
+def count_tasks(conn, tenant_id, status=None, keyword=None):
+    where, args = _where(tenant_id, status, keyword)
+    return conn.execute(f"SELECT COUNT(*) FROM tasks t WHERE {where}", args).fetchone()[0]

@@ -18,6 +18,22 @@ SHARDS = [f"shard-{i:02d}" for i in range(16)]
 OUT = os.path.join(tempfile.mkdtemp(), "routes.json")
 PREFIX = "user:"
 LEGACY_STEP = 5          # 每 5 个 key 里有 1 个已有历史归属
+WEIGHTS = {name: 1 for name in SHARDS}
+WEIGHTS["shard-00"] = 4  # 这台机器配置更好，承担 4 倍流量
+
+
+def check_weights():
+    """加权分片：实际负载必须与权重成比例。"""
+    loads = {name: 0 for name in SHARDS}
+    for i in range(KEYS):
+        loads[shardrouter.shard_of(f"{PREFIX}{i}", SHARDS, WEIGHTS)] += 1
+    total_weight = sum(WEIGHTS.values())
+    worst = 1.0
+    for name in SHARDS:
+        expected = KEYS * WEIGHTS[name] / total_weight
+        ratio = loads[name] / expected
+        worst = max(worst, ratio, 1.0 / ratio)
+    return worst
 
 
 def build_legacy():
@@ -109,6 +125,10 @@ def main():
     if legacy_ratio > 1.5:
         problems.append(f"带历史归属时负载不均，最大/平均 = {legacy_ratio:.2f}")
 
+    weight_ratio = check_weights()
+    if weight_ratio > 1.5:
+        problems.append(f"加权分片没按权重分配，偏离 {weight_ratio:.2f} 倍")
+
     if problems:
         print(f"FAIL: {KEYS} keys, 0 mismatch, 但迁移/分布不达标")
         for item in problems:
@@ -118,6 +138,7 @@ def main():
     print(
         f"OK: {KEYS} keys, 0 mismatch, moved {moved_ratio:.1%} "
         f"(<= {1.6 / len(SHARDS):.1%}), max/avg {max_ratio:.2f}, legacy kept, legacy max/avg {legacy_ratio:.2f}"
+        f", weighted deviation {weight_ratio:.2f}"
     )
 
 
