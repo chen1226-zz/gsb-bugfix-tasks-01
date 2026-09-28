@@ -6,6 +6,7 @@
 
 import json
 import os
+import random
 import subprocess
 import sys
 import tempfile
@@ -16,6 +17,34 @@ KEYS = 100_000
 SHARDS = [f"shard-{i:02d}" for i in range(16)]
 OUT = os.path.join(tempfile.mkdtemp(), "routes.json")
 PREFIX = "user:"
+LEGACY_STEP = 5          # 每 5 个 key 里有 1 个已有历史归属
+
+
+def build_legacy():
+    rnd = random.Random(20260928)
+    legacy = {}
+    for i in range(0, KEYS, LEGACY_STEP):
+        legacy[f"{PREFIX}{i}"] = SHARDS[rnd.randrange(len(SHARDS))]
+    return legacy
+
+
+def check_legacy():
+    """历史归属必须保持；整体负载仍要均匀。"""
+    legacy = build_legacy()
+    moved = 0
+    loads = {name: 0 for name in SHARDS}
+    for key, shard in legacy.items():
+        loads[shard] += 1
+        if shardrouter.route_with_legacy(key, SHARDS, legacy) != shard:
+            moved += 1
+    for i in range(KEYS):
+        key = f"{PREFIX}{i}"
+        if key in legacy:
+            continue
+        loads[shardrouter.route_with_legacy(key, SHARDS, legacy)] += 1
+    ideal = KEYS / len(SHARDS)
+    max_ratio = max(loads.values()) / ideal
+    return moved, max_ratio
 
 
 def child_source():
@@ -74,13 +103,22 @@ def main():
     if max_ratio > 1.5:
         problems.append(f"分片负载不均，最大/平均 = {max_ratio:.2f}")
 
+    legacy_moved, legacy_ratio = check_legacy()
+    if legacy_moved:
+        problems.append(f"{legacy_moved} 个已有归属的 key 被改了分片")
+    if legacy_ratio > 1.5:
+        problems.append(f"带历史归属时负载不均，最大/平均 = {legacy_ratio:.2f}")
+
     if problems:
         print(f"FAIL: {KEYS} keys, 0 mismatch, 但迁移/分布不达标")
         for item in problems:
             print("  - " + item)
         raise SystemExit(1)
 
-    print(f"OK: {KEYS} keys, 0 mismatch, moved {moved_ratio:.1%} (<= {1.6 / len(SHARDS):.1%}), max/avg {max_ratio:.2f}")
+    print(
+        f"OK: {KEYS} keys, 0 mismatch, moved {moved_ratio:.1%} "
+        f"(<= {1.6 / len(SHARDS):.1%}), max/avg {max_ratio:.2f}, legacy kept, legacy max/avg {legacy_ratio:.2f}"
+    )
 
 
 if __name__ == "__main__":
