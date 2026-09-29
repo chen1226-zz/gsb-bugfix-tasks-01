@@ -7,16 +7,19 @@
         .stats()                             -> dict
     send_signature(secret, timestamp, body)  -> str
 
-sender(payload, headers) 由调用方注入；clock() 返回单调秒数，同样可注入。
+sender(endpoint, body, headers) 由调用方注入；clock() 返回单调秒数，同样可注入。
+退避基数 backoff_seconds(attempt) 与抖动 jitter() 是模块级函数，测试可直接替换注入，
+无需真实 sleep。
 """
 
 import hashlib
 import hmac
 import json
 import os
+import random
 
-BACKOFF = [1, 2, 4, 8, 16, 32, 60]
 MAX_ATTEMPTS = 8
+MAX_BACKOFF = 60
 SECRET = b"demo-secret"
 
 
@@ -26,22 +29,43 @@ def send_signature(secret, timestamp, body):
     return mac.hexdigest()
 
 
+def backoff_seconds(attempt):
+    """第 attempt 次失败后的退避基数：1/2/4/8...，上限 60s。"""
+    return min(2 ** (attempt - 1), MAX_BACKOFF)
+
+
+def jitter():
+    """抖动系数，避免大量任务同一时刻重试造成惊群。"""
+    return random.uniform(0.5, 1.5)
+
+
+def _retryable(exc):
+    """4xx（除 408、429）不重试；其余异常（含网络错误）可重试。
+
+    状态码取自异常的 status 或 code 属性（兼容 urllib.error.HTTPError）。
+    """
+    status = getattr(exc, "status", getattr(exc, "code", None))
+    if status is None:
+        return True
+    return not (400 <= status < 500 and status not in (408, 429))
+
+
 class DeliveryService:
     def __init__(self, path, sender, clock):
         self.path = path
         self.sender = sender
         self.clock = clock
         self.tasks = {}
+        self.keys = {}
         self.seq = 0
         if os.path.exists(path):
             self._load()
 
     # ---- 持久化 ----
     def _save(self):
-        done = {tid: t for tid, t in self.tasks.items() if t["state"] == "delivered"}
         tmp = self.path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as fh:
-            json.dump({"seq": self.seq, "tasks": done}, fh)
+            json.dump({"seq": self.seq, "tasks": self.tasks}, fh)
             fh.flush()
             os.fsync(fh.fileno())
         os.replace(tmp, self.path)
@@ -51,9 +75,15 @@ class DeliveryService:
             blob = json.load(fh)
         self.seq = blob["seq"]
         self.tasks = blob["tasks"]
+        self.keys = {
+            (t["endpoint"], t["event_id"]): tid for tid, t in self.tasks.items()
+        }
 
     # ---- 业务 ----
     def submit(self, endpoint, event_id, payload):
+        key = (endpoint, event_id)
+        if key in self.keys:  # 幂等：重复提交返回同一个 task_id，不重复投递
+            return self.keys[key]
         self.seq += 1
         task_id = f"t{self.seq:04d}"
         self.tasks[task_id] = {
@@ -65,6 +95,7 @@ class DeliveryService:
             "attempts": 0,
             "next_at": self.clock(),
         }
+        self.keys[key] = task_id
         self._save()
         return task_id
 
@@ -80,17 +111,22 @@ class DeliveryService:
 
     def process_due(self, max_tasks=10):
         result = {"delivered": 0, "retried": 0, "dead": 0}
+        now = self.clock()
         for task in list(self.tasks.values()):
-            if result["delivered"] + result["retried"] + result["dead"] >= max_tasks:
+            if sum(result.values()) >= max_tasks:
                 break
-            if task["state"] != "pending" or task["next_at"] > self.clock():
+            if task["state"] != "pending" or task["next_at"] > now:
                 continue
             task["attempts"] += 1
             try:
                 self._deliver(task)
-            except Exception:
-                task["state"] = "dead"
-                result["dead"] += 1
+            except Exception as exc:
+                if not _retryable(exc) or task["attempts"] >= MAX_ATTEMPTS:
+                    task["state"] = "dead"
+                    result["dead"] += 1
+                else:
+                    task["next_at"] = now + backoff_seconds(task["attempts"]) * jitter()
+                    result["retried"] += 1
                 continue
             task["state"] = "delivered"
             result["delivered"] += 1

@@ -18,13 +18,17 @@
 | `run_demo.py` | 复现脚本 |
 | `tests/test_webhook.py` | unittest 用例 |
 
-## 已知现象
+## 行为说明
 
-一是同一个 `(endpoint, event_id)` 重复提交时会重复投递，下游重复记账；二是投递失败
-之后没有重试，任务直接变成死信；三是进程重启后未投递的任务会丢。
-
-生产上还要求出站请求带 `X-Signature`（HMAC-SHA256，签名含时间戳与 body）与
-`X-Task-Id`。
+- 幂等：`(endpoint, event_id)` 为幂等键，重复提交返回同一个 `task_id`，不重复投递。
+- 重试：失败按指数退避（1s/2s/4s…，上限 60s）加抖动重试；4xx（除 408、429）不重试；
+  连续失败 8 次进入死信（`dead`）。
+- 签名：出站请求带 `X-Signature`（HMAC-SHA256，签名内容为 `时间戳.body`）、
+  `X-Timestamp` 与 `X-Task-Id`。
+- 持久化：所有任务状态原子写入本地 JSON 文件（tmp + rename + fsync），进程重启后
+  未完成任务自动恢复。
+- 可测试性：退避基数 `backoff_seconds(attempt)` 与抖动 `jitter()` 是模块级函数，
+  测试可直接替换注入，无需真实 sleep。
 
 ## 运行
 
